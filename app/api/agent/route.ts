@@ -12,41 +12,21 @@ export const dynamic = "force-dynamic";
 const conversationStore = new Map<string, Message[]>();
 
 const SYSTEM_PROMPT = `You are FC_Agent, a professional crypto trading AI.
+Analyze all provided market data and respond ONLY in this exact format:
 
-Your analysis pipeline:
-1. Price & Chart Analysis (CoinGecko OHLCV)
-2. Liquidity Analysis (Binance Order Book)
-3. Liquidation Levels (Coinglass)
-4. Combined Trading Strategy
+🎯 ENTRY: $[price or range]
+🛑 STOP LOSS: $[price]
+💰 TP1: $[price]
+💰 TP2: $[price]
+💰 TP3: $[price]
+📝 ALASAN: [1-2 kalimat singkat]
+💯 CONFIDENCE: [X/10]
+⚠️ DYOR — Not financial advice
 
-When given full market data ALWAYS structure your response as:
-
-📊 MARKET OVERVIEW
-- Current price, trend, bias
-
-📈 TECHNICAL ANALYSIS (SMC + MA + RSI)
-- SMC: BOS, CHoCH, Order Blocks, FVG
-- MA: MA7 vs MA25, EMA9 vs EMA21 signal
-- RSI: value, zone, divergence
-
-💧 LIQUIDITY ANALYSIS
-- Key bid/ask walls from order book
-- Liquidation clusters (magnet zones)
-- Likely sweep targets
-
-🎯 TRADING STRATEGY
-- Bias: Bullish/Bearish/Sideways
-- Entry Zone: $X — $Y
-- Stop Loss: $Z (reason)
-- TP1: $A | TP2: $B | TP3: $C
-- Risk/Reward: X:Y
-- Confidence: X/10
-
-📝 REASONING
-- Why this setup makes sense
-
-⚠️ DYOR — Not financial advice.
-Respond in the same language as the user.`;
+Rules:
+- No intro, no outro, no extra text
+- Respond in same language as user
+- Base analysis on real data provided`;
 
 const COIN_MAP: Record<string, string> = {
   btc: "bitcoin", bitcoin: "bitcoin",
@@ -95,10 +75,10 @@ const TA_KEYWORDS = [
   "support", "resistance", "zona", "zone", "area",
   "carikan", "cari", "kasih", "berikan", "tunjukkan", "setup",
   "sinyal", "signal", "stoploss", "stop loss", "sl",
-  "take profit", "tp", "target", "r/r", "risk", "reward",
+  "take profit", "tp", "target", "risk", "reward",
   "breakout", "breakdown", "retest", "bounce", "reversal",
   "bullish", "bearish", "sideways", "trend", "tren",
-  "prediksi", "predict", "forecast", "dip",
+  "prediksi", "predict", "forecast", "dip", "pump", "dump",
   "1m", "5m", "15m", "1h", "4h", "1d", "weekly", "daily",
   "trading", "trade", "trader",
 ];
@@ -119,11 +99,8 @@ const LIQUIDITY_ONLY_KEYWORDS = [
 ];
 
 function extractSymbol(msg: string): string | null {
-  // Match trading pair dulu misal btcusdt, ethusdt
   const pairMatch = msg.match(/\b([a-z]{2,10})(usdt|usd|busd|usdc|bnb|eth|btc)\b/i);
   if (pairMatch) return pairMatch[1].toLowerCase();
-
-  // Match dari COIN_MAP
   for (const key of Object.keys(COIN_MAP)) {
     const regex = new RegExp(`\\b${key}\\b`, "i");
     if (regex.test(msg)) return key;
@@ -148,27 +125,19 @@ function needsLiquidityOnly(msg: string): boolean {
   return LIQUIDITY_ONLY_KEYWORDS.some((k) => msg.toLowerCase().includes(k));
 }
 
-// ==================== FULL TRADING PIPELINE ====================
-async function runFullTradingPipeline(
-  coinId: string,
-  symbol: string
-): Promise<string> {
-  console.log(`[Pipeline] Starting full analysis for ${coinId}`);
-
+async function runFullTradingPipeline(coinId: string, symbol: string): Promise<string> {
   const rawSymbol = symbol.toUpperCase();
 
-  // Step 1 + 2 + 3 — jalankan semua paralel untuk hemat waktu
   const [ohlcv, marketData, orderBook, liquidation] = await Promise.allSettled([
-    getTokenOHLCV(coinId),           // Step 1a: Chart data
-    getTokenMarketData(coinId),      // Step 1b: Price & market info
-    getOrderBookLiquidity(rawSymbol), // Step 2: Binance order book
-    getLiquidationLevels(rawSymbol),  // Step 3: Coinglass liquidation
+    getTokenOHLCV(coinId),
+    getTokenMarketData(coinId),
+    getOrderBookLiquidity(rawSymbol),
+    getLiquidationLevels(rawSymbol),
   ]);
 
   let fullReport = "";
 
-  // ── Step 1: Price & Technical Analysis ──
-  fullReport += "=== STEP 1: PRICE & CHART ANALYSIS (CoinGecko) ===\n";
+  fullReport += "=== PRICE & CHART (CoinGecko) ===\n";
   const ohlcvData = ohlcv.status === "fulfilled" ? ohlcv.value : null;
   const mktData = marketData.status === "fulfilled" ? marketData.value : null;
 
@@ -182,39 +151,29 @@ async function runFullTradingPipeline(
     const mcap = mktData.market_data?.market_cap?.usd
       ? `$${(mktData.market_data.market_cap.usd / 1e9).toFixed(2)}B`
       : "N/A";
-    const ath = mktData.market_data?.ath?.usd
-      ? `$${mktData.market_data.ath.usd.toLocaleString()}`
-      : "N/A";
-    const athChange = mktData.market_data?.ath_change_percentage?.usd?.toFixed(2) || "N/A";
 
-    fullReport += `Current Price: $${price.toLocaleString()}
-24h Change: ${change24h}%
-7d Change: ${change7d}%
-Volume 24h: ${vol}
-Market Cap: ${mcap}
-ATH: ${ath} (${athChange}% from ATH)\n\n`;
+    fullReport += `Price: $${price.toLocaleString()}\n`;
+    fullReport += `24h: ${change24h}% | 7d: ${change7d}%\n`;
+    fullReport += `Volume: ${vol} | MCap: ${mcap}\n\n`;
 
-    // Technical indicators
     const taReport = generateTechnicalReport(mktData.name || coinId, ohlcvData, price);
     fullReport += taReport;
   } else {
-    fullReport += "⚠️ Chart data terbatas\n";
+    fullReport += "Chart data tidak tersedia\n";
   }
 
-  // ── Step 2: Binance Order Book ──
-  fullReport += "\n\n=== STEP 2: LIQUIDITY ANALYSIS (Binance Order Book) ===\n";
+  fullReport += "\n\n=== ORDER BOOK (Binance) ===\n";
   if (orderBook.status === "fulfilled") {
     fullReport += orderBook.value;
   } else {
-    fullReport += "⚠️ Order book data tidak tersedia\n";
+    fullReport += "Order book tidak tersedia\n";
   }
 
-  // ── Step 3: Coinglass Liquidation ──
-  fullReport += "\n\n=== STEP 3: LIQUIDATION LEVELS (Coinglass) ===\n";
+  fullReport += "\n\n=== LIQUIDATION LEVELS (Coinglass) ===\n";
   if (liquidation.status === "fulfilled") {
     fullReport += liquidation.value;
   } else {
-    fullReport += "⚠️ Liquidation data tidak tersedia\n";
+    fullReport += "Liquidation data tidak tersedia\n";
   }
 
   return fullReport;
@@ -226,7 +185,6 @@ async function runTools(
 ): Promise<{ toolResult: string; tool: string | null }> {
   const msg = message.toLowerCase();
 
-  // Resolve coin
   let symbol = extractSymbol(msg);
   let coinId: string | null = null;
 
@@ -234,7 +192,6 @@ async function runTools(
     coinId = await resolveCoinId(symbol);
   }
 
-  // Fallback ke history
   if (!coinId && (needsTA(msg) || needsLiquidityOnly(msg))) {
     for (let i = history.length - 1; i >= 0; i--) {
       const histSymbol = extractSymbol(history[i].content.toLowerCase());
@@ -246,13 +203,11 @@ async function runTools(
     }
   }
 
-  // ── FULL TRADING PIPELINE (TA + Liquidity + Liquidation) ──
   if (needsTA(msg) && coinId && symbol) {
-    const pipelineData = await runFullTradingPipeline(coinId, symbol);
-    return { toolResult: pipelineData, tool: "pipeline" };
+    const data = await runFullTradingPipeline(coinId, symbol);
+    return { toolResult: data, tool: "pipeline" };
   }
 
-  // ── LIQUIDITY ONLY ──
   if (needsLiquidityOnly(msg) && coinId && symbol) {
     const rawSymbol = symbol.toUpperCase();
     const [ob, liq] = await Promise.all([
@@ -262,7 +217,6 @@ async function runTools(
     return { toolResult: `${ob}\n\n${liq}`, tool: "liquidity" };
   }
 
-  // ── TOKEN SCREENING ──
   if (needsScreening(msg)) {
     let params: any = { limit: 7 };
     if (msg.includes("pump") || msg.includes("naik") || msg.includes("gainer")) params.minPriceChange = 3;
@@ -274,22 +228,18 @@ async function runTools(
     return { toolResult: await screenTokens(params), tool: "screener" };
   }
 
-  // ── HARGA SAJA ──
   if ((msg.includes("harga") || msg.includes("price") || msg.includes("berapa")) && coinId) {
     return { toolResult: await getCryptoPrice(coinId), tool: "price" };
   }
 
-  // ── TRENDING ──
   if (msg.includes("trending") || msg.includes("tren") || msg.includes("populer")) {
     return { toolResult: await getTrendingCoins(), tool: "trending" };
   }
 
-  // ── TOP MARKET ──
   if (msg.includes("top") || msg.includes("market") || msg.includes("ranking")) {
     return { toolResult: await getTopCoins(), tool: "market" };
   }
 
-  // ── WEB SEARCH ──
   if (msg.includes("berita") || msg.includes("news") || msg.includes("terbaru") || msg.includes("update")) {
     return { toolResult: await webSearch(message), tool: "search" };
   }
@@ -308,7 +258,7 @@ export async function POST(req: NextRequest) {
     const { toolResult, tool } = await runTools(userMessage, history);
 
     const enriched = toolResult
-      ? `${userMessage}\n\n[Live market data — 3 sources: CoinGecko + Binance + Coinglass]:\n${toolResult}`
+      ? `${userMessage}\n\n[Live market data — CoinGecko + Binance + Coinglass]:\n${toolResult}`
       : userMessage;
 
     history.push({ role: "user", content: enriched });
