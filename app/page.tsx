@@ -17,6 +17,8 @@ const TOOL_BADGES: Record<string, { label: string; color: string }> = {
   trending:  { label: "🔥 Trending", color: "bg-orange-900 text-orange-300 border border-orange-700" },
   market:    { label: "📈 Market", color: "bg-purple-900 text-purple-300 border border-purple-700" },
   search:    { label: "🌐 Web", color: "bg-gray-700 text-gray-300 border border-gray-600" },
+  liquidity: { label: "💧 Liquidity", color: "bg-cyan-900 text-cyan-300 border border-cyan-700" },
+  pipeline: { label: "🔬 Full Analysis", color: "bg-gradient-to-r from-emerald-900 to-blue-900 text-white border border-emerald-700" },
 };
 
 const QUICK_PROMPTS = [

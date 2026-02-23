@@ -4,7 +4,7 @@ import { getCryptoPrice, getTrendingCoins, getTopCoins, searchCoinId } from "@/l
 import { webSearch } from "@/lib/tools/websearch";
 import { screenTokens, getTokenOHLCV, getTokenMarketData } from "@/lib/tools/screener";
 import { generateTechnicalReport } from "@/lib/tools/technical";
-import { getOrderBookLiquidity, getLiquidationLevels, getFullLiquidityReport } from "@/lib/tools/liquidity";
+import { getOrderBookLiquidity, getLiquidationLevels } from "@/lib/tools/liquidity";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -12,22 +12,42 @@ export const dynamic = "force-dynamic";
 const conversationStore = new Map<string, Message[]>();
 
 const SYSTEM_PROMPT = `You are FC_Agent, a professional crypto trading AI.
-You specialize in Technical Analysis: SMC, Moving Average (MA7, MA25, EMA9, EMA21), RSI, and Token Screening.
 
-When given technical data ALWAYS provide:
-1. 📍 Market Bias (Bullish/Bearish/Sideways)
-2. 🔑 Key Levels (Support & Resistance)
-3. 🎯 Entry Zone (price range)
-4. 🛑 Stop Loss (SL)
-5. 💰 Take Profit (TP1, TP2, TP3)
-6. ⚖️ Risk/Reward Ratio
-7. 💯 Confidence (1-10)
-8. 📝 Brief Reasoning
+Your analysis pipeline:
+1. Price & Chart Analysis (CoinGecko OHLCV)
+2. Liquidity Analysis (Binance Order Book)
+3. Liquidation Levels (Coinglass)
+4. Combined Trading Strategy
 
-Format clearly with emojis. Always end with: ⚠️ DYOR — Not financial advice.
+When given full market data ALWAYS structure your response as:
+
+📊 MARKET OVERVIEW
+- Current price, trend, bias
+
+📈 TECHNICAL ANALYSIS (SMC + MA + RSI)
+- SMC: BOS, CHoCH, Order Blocks, FVG
+- MA: MA7 vs MA25, EMA9 vs EMA21 signal
+- RSI: value, zone, divergence
+
+💧 LIQUIDITY ANALYSIS
+- Key bid/ask walls from order book
+- Liquidation clusters (magnet zones)
+- Likely sweep targets
+
+🎯 TRADING STRATEGY
+- Bias: Bullish/Bearish/Sideways
+- Entry Zone: $X — $Y
+- Stop Loss: $Z (reason)
+- TP1: $A | TP2: $B | TP3: $C
+- Risk/Reward: X:Y
+- Confidence: X/10
+
+📝 REASONING
+- Why this setup makes sense
+
+⚠️ DYOR — Not financial advice.
 Respond in the same language as the user.`;
 
-// Hardcoded map untuk coin populer (fast lookup)
 const COIN_MAP: Record<string, string> = {
   btc: "bitcoin", bitcoin: "bitcoin",
   eth: "ethereum", ethereum: "ethereum",
@@ -42,8 +62,7 @@ const COIN_MAP: Record<string, string> = {
   link: "chainlink", chainlink: "chainlink",
   uni: "uniswap", uniswap: "uniswap",
   atom: "cosmos", cosmos: "cosmos",
-  near: "near",
-  sui: "sui",
+  near: "near", sui: "sui",
   arb: "arbitrum", arbitrum: "arbitrum",
   op: "optimism", optimism: "optimism",
   apt: "aptos", aptos: "aptos",
@@ -52,103 +71,70 @@ const COIN_MAP: Record<string, string> = {
   sei: "sei-network",
   jup: "jupiter-exchange-solana",
   wld: "worldcoin-wld",
-  pepe: "pepe",
-  shib: "shiba-inu",
-  floki: "floki",
+  pepe: "pepe", shib: "shiba-inu", floki: "floki",
   ftm: "fantom", fantom: "fantom",
-  crv: "curve-dao-token",
-  aave: "aave",
-  mkr: "maker",
-  snx: "havven",
-  // Layer 2
-  zro: "layerzero",
-  zk: "zksync",
-  strk: "starknet",
-  manta: "manta-network",
-  blast: "blast",
-  // Meme
-  bonk: "bonk",
-  wif: "dogwifcoin",
-  popcat: "popcat",
-  brett: "brett",
-  // DeFi
-  pendle: "pendle",
-  gmx: "gmx",
-  dydx: "dydx",
+  crv: "curve-dao-token", aave: "aave", mkr: "maker",
+  zro: "layerzero", zk: "zksync",
+  strk: "starknet", manta: "manta-network",
+  bonk: "bonk", wif: "dogwifcoin",
+  pendle: "pendle", gmx: "gmx",
   cake: "pancakeswap-token",
-  // AI tokens
-  fet: "fetch-ai",
-  rndr: "render-token", render: "render-token",
-  wmt: "world-mobile-token",
-  ocean: "ocean-protocol",
-  // Others
-  sand: "the-sandbox",
-  mana: "decentraland",
-  axs: "axie-infinity",
-  imx: "immutable-x",
-  gala: "gala",
-  ape: "apecoin",
-  ldo: "lido-dao",
-  steth: "staked-ether",
-  rpl: "rocket-pool",
+  fet: "fetch-ai", rndr: "render-token",
+  sand: "the-sandbox", mana: "decentraland",
+  axs: "axie-infinity", imx: "immutable-x",
+  ldo: "lido-dao", rpl: "rocket-pool",
 };
 
-// Extract token symbol dari teks (hapus "usdt", "usd", "busd" suffix)
+const TA_KEYWORDS = [
+  "analisis", "analysis", "analyze", "analisa", "teknikal", "technical",
+  "smc", "smart money", "order block", "fvg", "fair value gap",
+  "bos", "choch", "imbalance",
+  "rsi", "moving average", "ma", "ema", "sma", "macd",
+  "entry", "long", "short", "buy", "sell", "beli", "jual",
+  "posisi", "position", "scalp", "swing", "spot",
+  "support", "resistance", "zona", "zone", "area",
+  "carikan", "cari", "kasih", "berikan", "tunjukkan", "setup",
+  "sinyal", "signal", "stoploss", "stop loss", "sl",
+  "take profit", "tp", "target", "r/r", "risk", "reward",
+  "breakout", "breakdown", "retest", "bounce", "reversal",
+  "bullish", "bearish", "sideways", "trend", "tren",
+  "prediksi", "predict", "forecast", "dip",
+  "1m", "5m", "15m", "1h", "4h", "1d", "weekly", "daily",
+  "trading", "trade", "trader",
+];
+
+const SCREEN_KEYWORDS = [
+  "screen", "screening", "filter", "scan",
+  "cari token", "find token", "token bagus", "coin bagus",
+  "volume tinggi", "high volume", "gainers", "gainer",
+  "losers", "loser", "momentum", "movers",
+  "large cap", "mid cap", "small cap", "micro cap",
+  "rekomendasi", "recommend", "watchlist",
+];
+
+const LIQUIDITY_ONLY_KEYWORDS = [
+  "order book", "orderbook", "bid wall", "ask wall",
+  "whale wall", "depth", "heatmap",
+  "liquidation", "likuidasi", "liq map",
+];
+
 function extractSymbol(msg: string): string | null {
-  // Match pattern seperti "btcusdt", "ethusdt", "zrousdt"
+  // Match trading pair dulu misal btcusdt, ethusdt
   const pairMatch = msg.match(/\b([a-z]{2,10})(usdt|usd|busd|usdc|bnb|eth|btc)\b/i);
   if (pairMatch) return pairMatch[1].toLowerCase();
 
-  // Match standalone symbol
-  const symbolMatch = msg.match(/\b([a-z]{2,10})\b/gi);
-  if (symbolMatch) {
-    for (const s of symbolMatch) {
-      const lower = s.toLowerCase();
-      if (COIN_MAP[lower]) return lower;
-      if (lower.length >= 2 && lower.length <= 6) return lower;
-    }
+  // Match dari COIN_MAP
+  for (const key of Object.keys(COIN_MAP)) {
+    const regex = new RegExp(`\\b${key}\\b`, "i");
+    if (regex.test(msg)) return key;
   }
   return null;
 }
 
 async function resolveCoinId(symbol: string): Promise<string | null> {
-  // Cek hardcoded map dulu (cepat)
   if (COIN_MAP[symbol]) return COIN_MAP[symbol];
-
-  // Fallback ke CoinGecko search API (dynamic)
-  console.log(`Searching CoinGecko for: ${symbol}`);
-  const coinId = await searchCoinId(symbol);
-  return coinId;
+  return await searchCoinId(symbol);
 }
-
-const TA_KEYWORDS = [
-  "analisis", "analysis", "analyze", "analisa", "teknikal", "technical",
-  "smc", "smart money", "order block", "ob", "fvg", "fair value gap",
-  "bos", "choch", "liquidity", "sweep", "imbalance",
-  "rsi", "moving average", "ma", "ema", "sma", "macd", "bollinger",
-  "entry", "long", "short", "buy", "sell", "beli", "jual",
-  "posisi", "position", "open", "close", "scalp", "swing", "spot",
-  "support", "resistance", "sr", "level", "zona", "zone", "area",
-  "carikan", "cari", "kasih", "berikan", "tunjukkan", "setup",
-  "peluang", "sinyal", "signal", "stoploss", "stop loss", "sl",
-  "take profit", "tp", "target", "r/r", "risk", "reward", "cutloss",
-  "breakout", "breakdown", "retest", "bounce", "reversal",
-  "bullish", "bearish", "sideways", "trend", "tren",
-  "prediksi", "predict", "forecast", "pump", "dump", "dip",
-  "candle", "candlestick", "pattern", "pola", "timeframe", "tf",
-  "1m", "5m", "15m", "1h", "4h", "1d", "weekly", "daily",
-];
-
-const SCREEN_KEYWORDS = [
-  "screen", "screening", "filter", "scan", "scanner",
-  "cari token", "find token", "find coin", "token bagus", "coin bagus",
-  "volume tinggi", "high volume", "gainers", "gainer",
-  "losers", "loser", "momentum", "movers",
-  "large cap", "mid cap", "small cap", "micro cap",
-  "rekomendasi", "recommend", "watchlist",
-  "top performer", "best coin", "altcoin bagus",
-  "naik", "turun", "pump candidate",
-];
 
 function needsTA(msg: string): boolean {
   return TA_KEYWORDS.some((k) => msg.toLowerCase().includes(k));
@@ -158,13 +144,89 @@ function needsScreening(msg: string): boolean {
   return SCREEN_KEYWORDS.some((k) => msg.toLowerCase().includes(k));
 }
 
+function needsLiquidityOnly(msg: string): boolean {
+  return LIQUIDITY_ONLY_KEYWORDS.some((k) => msg.toLowerCase().includes(k));
+}
+
+// ==================== FULL TRADING PIPELINE ====================
+async function runFullTradingPipeline(
+  coinId: string,
+  symbol: string
+): Promise<string> {
+  console.log(`[Pipeline] Starting full analysis for ${coinId}`);
+
+  const rawSymbol = symbol.toUpperCase();
+
+  // Step 1 + 2 + 3 — jalankan semua paralel untuk hemat waktu
+  const [ohlcv, marketData, orderBook, liquidation] = await Promise.allSettled([
+    getTokenOHLCV(coinId),           // Step 1a: Chart data
+    getTokenMarketData(coinId),      // Step 1b: Price & market info
+    getOrderBookLiquidity(rawSymbol), // Step 2: Binance order book
+    getLiquidationLevels(rawSymbol),  // Step 3: Coinglass liquidation
+  ]);
+
+  let fullReport = "";
+
+  // ── Step 1: Price & Technical Analysis ──
+  fullReport += "=== STEP 1: PRICE & CHART ANALYSIS (CoinGecko) ===\n";
+  const ohlcvData = ohlcv.status === "fulfilled" ? ohlcv.value : null;
+  const mktData = marketData.status === "fulfilled" ? marketData.value : null;
+
+  if (ohlcvData && mktData) {
+    const price = mktData.market_data?.current_price?.usd || 0;
+    const change24h = mktData.market_data?.price_change_percentage_24h?.toFixed(2) || "N/A";
+    const change7d = mktData.market_data?.price_change_percentage_7d?.toFixed(2) || "N/A";
+    const vol = mktData.market_data?.total_volume?.usd
+      ? `$${(mktData.market_data.total_volume.usd / 1e6).toFixed(1)}M`
+      : "N/A";
+    const mcap = mktData.market_data?.market_cap?.usd
+      ? `$${(mktData.market_data.market_cap.usd / 1e9).toFixed(2)}B`
+      : "N/A";
+    const ath = mktData.market_data?.ath?.usd
+      ? `$${mktData.market_data.ath.usd.toLocaleString()}`
+      : "N/A";
+    const athChange = mktData.market_data?.ath_change_percentage?.usd?.toFixed(2) || "N/A";
+
+    fullReport += `Current Price: $${price.toLocaleString()}
+24h Change: ${change24h}%
+7d Change: ${change7d}%
+Volume 24h: ${vol}
+Market Cap: ${mcap}
+ATH: ${ath} (${athChange}% from ATH)\n\n`;
+
+    // Technical indicators
+    const taReport = generateTechnicalReport(mktData.name || coinId, ohlcvData, price);
+    fullReport += taReport;
+  } else {
+    fullReport += "⚠️ Chart data terbatas\n";
+  }
+
+  // ── Step 2: Binance Order Book ──
+  fullReport += "\n\n=== STEP 2: LIQUIDITY ANALYSIS (Binance Order Book) ===\n";
+  if (orderBook.status === "fulfilled") {
+    fullReport += orderBook.value;
+  } else {
+    fullReport += "⚠️ Order book data tidak tersedia\n";
+  }
+
+  // ── Step 3: Coinglass Liquidation ──
+  fullReport += "\n\n=== STEP 3: LIQUIDATION LEVELS (Coinglass) ===\n";
+  if (liquidation.status === "fulfilled") {
+    fullReport += liquidation.value;
+  } else {
+    fullReport += "⚠️ Liquidation data tidak tersedia\n";
+  }
+
+  return fullReport;
+}
+
 async function runTools(
   message: string,
   history: Message[]
 ): Promise<{ toolResult: string; tool: string | null }> {
   const msg = message.toLowerCase();
 
-  // Extract symbol dari pesan
+  // Resolve coin
   let symbol = extractSymbol(msg);
   let coinId: string | null = null;
 
@@ -172,51 +234,35 @@ async function runTools(
     coinId = await resolveCoinId(symbol);
   }
 
-  // Kalau tidak ketemu, cari dari history
-  if (!coinId && needsTA(msg)) {
+  // Fallback ke history
+  if (!coinId && (needsTA(msg) || needsLiquidityOnly(msg))) {
     for (let i = history.length - 1; i >= 0; i--) {
       const histSymbol = extractSymbol(history[i].content.toLowerCase());
       if (histSymbol) {
         coinId = await resolveCoinId(histSymbol);
+        symbol = histSymbol;
         if (coinId) break;
       }
     }
   }
 
-
-  // Liquidity Heatmap
-  const needsLiquidity = LIQUIDITY_KEYWORDS.some((k) => msg.includes(k));
-  if (needsLiquidity && coinId) {
-    const hasLiquidation = msg.includes("liquidation") || msg.includes("likuidasi") ||
-                           msg.includes("heatmap") || msg.includes("liq");
-    if (hasLiquidation) {
-      const report = await getFullLiquidityReport(coinId.replace("-", ""));
-      return { toolResult: report, tool: "liquidity" };
-    } else {
-      const report = await getOrderBookLiquidity(coinId.replace("-", ""));
-      return { toolResult: report, tool: "liquidity" };
-    }
+  // ── FULL TRADING PIPELINE (TA + Liquidity + Liquidation) ──
+  if (needsTA(msg) && coinId && symbol) {
+    const pipelineData = await runFullTradingPipeline(coinId, symbol);
+    return { toolResult: pipelineData, tool: "pipeline" };
   }
 
-  // Technical Analysis
-  if (needsTA(msg) && coinId) {
-    const [ohlcv, marketData] = await Promise.all([
-      getTokenOHLCV(coinId),
-      getTokenMarketData(coinId),
+  // ── LIQUIDITY ONLY ──
+  if (needsLiquidityOnly(msg) && coinId && symbol) {
+    const rawSymbol = symbol.toUpperCase();
+    const [ob, liq] = await Promise.all([
+      getOrderBookLiquidity(rawSymbol),
+      getLiquidationLevels(rawSymbol),
     ]);
-    if (ohlcv && marketData) {
-      const price = marketData.market_data?.current_price?.usd || 0;
-      const name = marketData.name || coinId;
-      const report = generateTechnicalReport(name, ohlcv, price);
-      return { toolResult: report, tool: "technical" };
-    } else {
-      // OHLCV tidak ada, minimal kasih price data
-      const priceData = await getCryptoPrice(coinId);
-      return { toolResult: `Data terbatas untuk ${coinId}:\n${priceData}`, tool: "price" };
-    }
+    return { toolResult: `${ob}\n\n${liq}`, tool: "liquidity" };
   }
 
-  // Token Screening
+  // ── TOKEN SCREENING ──
   if (needsScreening(msg)) {
     let params: any = { limit: 7 };
     if (msg.includes("pump") || msg.includes("naik") || msg.includes("gainer")) params.minPriceChange = 3;
@@ -225,26 +271,25 @@ async function runTools(
     if (msg.includes("large")) params.minMarketCap = 1_000_000_000;
     if (msg.includes("mid")) { params.minMarketCap = 100_000_000; params.maxMarketCap = 1_000_000_000; }
     if (msg.includes("small") || msg.includes("micro")) { params.minMarketCap = 1_000_000; params.maxMarketCap = 100_000_000; }
-    const result = await screenTokens(params);
-    return { toolResult: result, tool: "screener" };
+    return { toolResult: await screenTokens(params), tool: "screener" };
   }
 
-  // Harga
+  // ── HARGA SAJA ──
   if ((msg.includes("harga") || msg.includes("price") || msg.includes("berapa")) && coinId) {
     return { toolResult: await getCryptoPrice(coinId), tool: "price" };
   }
 
-  // Trending
+  // ── TRENDING ──
   if (msg.includes("trending") || msg.includes("tren") || msg.includes("populer")) {
     return { toolResult: await getTrendingCoins(), tool: "trending" };
   }
 
-  // Top market
+  // ── TOP MARKET ──
   if (msg.includes("top") || msg.includes("market") || msg.includes("ranking")) {
     return { toolResult: await getTopCoins(), tool: "market" };
   }
 
-  // Web search
+  // ── WEB SEARCH ──
   if (msg.includes("berita") || msg.includes("news") || msg.includes("terbaru") || msg.includes("update")) {
     return { toolResult: await webSearch(message), tool: "search" };
   }
@@ -263,7 +308,7 @@ export async function POST(req: NextRequest) {
     const { toolResult, tool } = await runTools(userMessage, history);
 
     const enriched = toolResult
-      ? `${userMessage}\n\n[Live market data]:\n${toolResult}`
+      ? `${userMessage}\n\n[Live market data — 3 sources: CoinGecko + Binance + Coinglass]:\n${toolResult}`
       : userMessage;
 
     history.push({ role: "user", content: enriched });
@@ -288,5 +333,3 @@ export async function DELETE(req: NextRequest) {
   conversationStore.delete(userId);
   return NextResponse.json({ success: true });
 }
-
-// Patch: tambah ke runTools sebelum return { toolResult: "", tool: null }
