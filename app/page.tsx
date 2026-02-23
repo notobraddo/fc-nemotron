@@ -28,6 +28,8 @@ const QUICK_PROMPTS = [
   { label: "📉 Short ETH", prompt: "Setup short ETH berdasarkan SMC dan RSI" },
   { label: "🔥 Trending", prompt: "Coin apa yang trending sekarang?" },
   { label: "🎯 SOL Setup", prompt: "Berikan trading setup SOL hari ini" },
+  { label: "💧 Liquidity BTC", prompt: "Tunjukkan liquidity heatmap dan order book BTC" },
+  { label: "💥 Liquidation ETH", prompt: "Carikan liquidation levels ETH" },
 ];
 
 export default function TradingAgent() {

@@ -4,6 +4,7 @@ import { getCryptoPrice, getTrendingCoins, getTopCoins, searchCoinId } from "@/l
 import { webSearch } from "@/lib/tools/websearch";
 import { screenTokens, getTokenOHLCV, getTokenMarketData } from "@/lib/tools/screener";
 import { generateTechnicalReport } from "@/lib/tools/technical";
+import { getOrderBookLiquidity, getLiquidationLevels, getFullLiquidityReport } from "@/lib/tools/liquidity";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -182,6 +183,21 @@ async function runTools(
     }
   }
 
+
+  // Liquidity Heatmap
+  const needsLiquidity = LIQUIDITY_KEYWORDS.some((k) => msg.includes(k));
+  if (needsLiquidity && coinId) {
+    const hasLiquidation = msg.includes("liquidation") || msg.includes("likuidasi") ||
+                           msg.includes("heatmap") || msg.includes("liq");
+    if (hasLiquidation) {
+      const report = await getFullLiquidityReport(coinId.replace("-", ""));
+      return { toolResult: report, tool: "liquidity" };
+    } else {
+      const report = await getOrderBookLiquidity(coinId.replace("-", ""));
+      return { toolResult: report, tool: "liquidity" };
+    }
+  }
+
   // Technical Analysis
   if (needsTA(msg) && coinId) {
     const [ohlcv, marketData] = await Promise.all([
@@ -272,3 +288,5 @@ export async function DELETE(req: NextRequest) {
   conversationStore.delete(userId);
   return NextResponse.json({ success: true });
 }
+
+// Patch: tambah ke runTools sebelum return { toolResult: "", tool: null }
