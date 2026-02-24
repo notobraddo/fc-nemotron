@@ -162,6 +162,7 @@ export default function TradingAgent() {
               </p>
             </div>
           </div>
+          <a href="/paper-trading" style={{ textDecoration: "none", padding: "4px 10px", background: "#0d2040", color: "#00d4ff", borderRadius: "6px", fontSize: "11px", border: "1px solid #00d4ff44" }}>📊 Auto Trade</a>
           <button
             onClick={clearChat}
             className="text-xs px-3 py-1 rounded"
