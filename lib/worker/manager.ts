@@ -1,8 +1,16 @@
-import { Worker } from "worker_threads";
 import path from "path";
 
+// Pakai dynamic import untuk Worker agar tidak crash di edge runtime
+let Worker: any;
+try {
+  const wt = require("worker_threads");
+  Worker = wt.Worker;
+} catch {
+  Worker = null;
+}
+
 interface BotState {
-  worker: Worker;
+  worker: any;
   userId: string;
   logs: string[];
   isRunning: boolean;
@@ -10,99 +18,81 @@ interface BotState {
   cycleCount: number;
 }
 
-// Global bot registry
 const bots = new Map<string, BotState>();
 
 export function startBot(userId: string): { success: boolean; message: string } {
+  if (!Worker) {
+    return { success: false, message: "Worker threads tidak tersedia di environment ini" };
+  }
+
   if (bots.has(userId)) {
-    return { success: false, message: "Bot sudah berjalan untuk user ini" };
+    return { success: false, message: "Bot sudah berjalan" };
   }
 
   try {
-    const worker = new Worker(
-      path.join(process.cwd(), "lib/worker/trading-bot.ts"),
-      {
-        workerData: { userId },
-        execArgv: ["--require", "ts-node/register"], // support TypeScript
-      }
-    );
+    // Pakai compiled JS file, bukan TS langsung
+    const workerPath = path.join(process.cwd(), "lib/worker/trading-bot.js");
+
+    const worker = new Worker(workerPath, { workerData: { userId } });
 
     const state: BotState = {
       worker,
       userId,
-      logs: [],
+      logs: [`[${new Date().toLocaleTimeString()}] 🚀 Bot started for ${userId}`],
       isRunning: true,
       startTime: new Date(),
       cycleCount: 0,
     };
 
-    worker.on("message", (msg) => {
+    worker.on("message", (msg: any) => {
       if (msg.type === "logs") {
         state.logs.push(...msg.logs);
         state.cycleCount++;
-        // Keep only last 100 logs
-        if (state.logs.length > 100) {
-          state.logs = state.logs.slice(-100);
-        }
-      }
-      if (msg.type === "started") {
-        state.logs.push(`✅ ${msg.message}`);
+        if (state.logs.length > 200) state.logs = state.logs.slice(-200);
       }
       if (msg.type === "error") {
-        state.logs.push(`❌ Error: ${msg.message}`);
+        state.logs.push(`❌ ${msg.message}`);
       }
     });
 
-    worker.on("error", (err) => {
+    worker.on("error", (err: Error) => {
       state.logs.push(`❌ Worker error: ${err.message}`);
       state.isRunning = false;
+      bots.delete(userId);
     });
 
-    worker.on("exit", (code) => {
+    worker.on("exit", (code: number) => {
       state.isRunning = false;
-      state.logs.push(`⚠️ Worker exited with code ${code}`);
+      if (code !== 0) state.logs.push(`⚠️ Worker exit code: ${code}`);
       bots.delete(userId);
     });
 
     bots.set(userId, state);
-    return { success: true, message: "Bot started! Trading setiap 5 menit" };
+    return { success: true, message: "Bot started! Cycle setiap 5 menit" };
   } catch (err: any) {
-    return { success: false, message: `Failed to start bot: ${err.message}` };
+    return { success: false, message: `Failed: ${err.message}` };
   }
 }
 
 export function stopBot(userId: string): { success: boolean; message: string } {
   const state = bots.get(userId);
-  if (!state) {
-    return { success: false, message: "Bot tidak ditemukan" };
-  }
-
-  state.worker.terminate();
+  if (!state) return { success: false, message: "Bot tidak ditemukan" };
+  try {
+    state.worker.terminate();
+  } catch {}
   bots.delete(userId);
   return { success: true, message: "Bot dihentikan" };
 }
 
-export function getBotStatus(userId: string): {
-  isRunning: boolean;
-  logs: string[];
-  cycleCount: number;
-  uptime?: string;
-} {
+export function getBotStatus(userId: string) {
   const state = bots.get(userId);
-  if (!state) {
-    return { isRunning: false, logs: [], cycleCount: 0 };
-  }
+  if (!state) return { isRunning: false, logs: [], cycleCount: 0, uptime: "0 menit" };
 
-  const uptime = Math.floor((Date.now() - state.startTime.getTime()) / 1000 / 60);
-
+  const uptime = Math.floor((Date.now() - state.startTime.getTime()) / 60000);
   return {
     isRunning: state.isRunning,
-    logs: state.logs.slice(-50), // Return last 50 logs
+    logs: state.logs.slice(-100),
     cycleCount: state.cycleCount,
     uptime: `${uptime} menit`,
   };
-}
-
-export function isRunning(userId: string): boolean {
-  return bots.has(userId);
 }

@@ -1,191 +1,148 @@
-// Liquidity Analysis: Order Book Depth (Binance) + Liquidation Levels (Coinglass)
-
-// ==================== BINANCE ORDER BOOK ====================
-export async function getOrderBookLiquidity(symbol: string): Promise<string> {
-  try {
-    // Normalize symbol: btc -> BTCUSDT
-    const pair = symbol.toUpperCase().replace("USDT", "") + "USDT";
-
-    const res = await fetch(
-      `https://api.binance.com/api/v3/depth?symbol=${pair}&limit=100`
-    );
-
-    if (!res.ok) {
-      return `❌ Symbol ${pair} tidak ditemukan di Binance.`;
-    }
-
-    const data = await res.json();
-
-    // Bids = buy orders (support)
-    // Asks = sell orders (resistance)
-    const bids: [string, string][] = data.bids; // [price, quantity]
-    const asks: [string, string][] = data.asks;
-
-    // Hitung total liquidity per level
-    const bidLevels = aggregateLevels(bids, 10);
-    const askLevels = aggregateLevels(asks, 10);
-
-    // Find bid walls (cluster besar)
-    const bidWalls = findWalls(bidLevels);
-    const askWalls = findWalls(askLevels);
-
-    // Current price estimate (mid price)
-    const bestBid = parseFloat(bids[0][0]);
-    const bestAsk = parseFloat(asks[0][0]);
-    const midPrice = ((bestBid + bestAsk) / 2).toFixed(4);
-
-    // Total liquidity
-    const totalBidLiq = bidLevels.reduce((sum, l) => sum + l.usdValue, 0);
-    const totalAskLiq = askLevels.reduce((sum, l) => sum + l.usdValue, 0);
-    const buyRatio = ((totalBidLiq / (totalBidLiq + totalAskLiq)) * 100).toFixed(1);
-    const sellRatio = (100 - parseFloat(buyRatio)).toFixed(1);
-
-    // Market sentiment dari order book
-    const sentiment = parseFloat(buyRatio) > 55
-      ? "🟢 Bullish (lebih banyak buy orders)"
-      : parseFloat(buyRatio) < 45
-      ? "🔴 Bearish (lebih banyak sell orders)"
-      : "🟡 Netral (seimbang)";
-
-    let result = `💧 LIQUIDITY ANALYSIS: ${pair}
-💵 Mid Price: $${midPrice}
-📊 Order Book Sentiment: ${sentiment}
-🟢 Buy Pressure: ${buyRatio}% | 🔴 Sell Pressure: ${sellRatio}%
-
-━━━━━━━━━━━━━━━━━━━━
-🟢 BID WALLS (Support / Target Sweep Bawah)
-━━━━━━━━━━━━━━━━━━━━`;
-
-    if (bidWalls.length > 0) {
-      bidWalls.forEach((wall, i) => {
-        result += `\n${i + 1}. 💰 $${wall.price.toFixed(4)} — $${(wall.usdValue / 1000).toFixed(0)}K liquidity`;
-      });
-    } else {
-      result += "\nTidak ada bid wall signifikan";
-    }
-
-    result += `\n
-━━━━━━━━━━━━━━━━━━━━
-🔴 ASK WALLS (Resistance / Target Sweep Atas)
-━━━━━━━━━━━━━━━━━━━━`;
-
-    if (askWalls.length > 0) {
-      askWalls.forEach((wall, i) => {
-        result += `\n${i + 1}. 💸 $${wall.price.toFixed(4)} — $${(wall.usdValue / 1000).toFixed(0)}K liquidity`;
-      });
-    } else {
-      result += "\nTidak ada ask wall signifikan";
-    }
-
-    result += `\n
-━━━━━━━━━━━━━━━━━━━━
-🎯 LIQUIDITY ZONES (SMC Context)
-━━━━━━━━━━━━━━━━━━━━
-📍 Nearest Support: $${bidLevels[0]?.price.toFixed(4) || "N/A"}
-📍 Nearest Resistance: $${askLevels[0]?.price.toFixed(4) || "N/A"}
-📍 Strong Support: $${bidWalls[0]?.price.toFixed(4) || "N/A"} (liquidity pool)
-📍 Strong Resistance: $${askWalls[0]?.price.toFixed(4) || "N/A"} (liquidity pool)`;
-
-    return result;
-  } catch (error) {
-    return `❌ Gagal mengambil order book data: ${error}`;
-  }
-}
-
 interface Level {
   price: number;
   quantity: number;
   usdValue: number;
 }
 
-function aggregateLevels(orders: [string, string][], groupSize: number): Level[] {
-  return orders.slice(0, 50).map(([price, qty]) => {
-    const p = parseFloat(price);
-    const q = parseFloat(qty);
-    return { price: p, quantity: q, usdValue: p * q };
-  });
+function parseLevels(orders: [string, string][]): Level[] {
+  return orders
+    .slice(0, 50)
+    .map(([price, qty]) => {
+      const p = parseFloat(price);
+      const q = parseFloat(qty);
+      if (isNaN(p) || isNaN(q)) return null;
+      return { price: p, quantity: q, usdValue: p * q };
+    })
+    .filter(Boolean) as Level[];
 }
 
-function findWalls(levels: Level[]): Level[] {
+function findWalls(levels: Level[], topN = 5): Level[] {
   if (levels.length === 0) return [];
-
-  const avgValue = levels.reduce((sum, l) => sum + l.usdValue, 0) / levels.length;
-  const threshold = avgValue * 2.5; // Wall = 2.5x rata-rata
-
+  const avg = levels.reduce((s, l) => s + l.usdValue, 0) / levels.length;
+  const threshold = avg * 2.5;
   return levels
-    .filter((l) => l.usdValue > threshold)
+    .filter((l) => l.usdValue >= threshold)
     .sort((a, b) => b.usdValue - a.usdValue)
-    .slice(0, 5);
+    .slice(0, topN);
 }
 
-// ==================== COINGLASS LIQUIDATION ====================
+function normalizePair(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/[-_/].*$/, "").replace("USDT", "");
+  return s + "USDT";
+}
+
+export async function getOrderBookLiquidity(symbol: string): Promise<string> {
+  try {
+    const pair = normalizePair(symbol);
+
+    const res = await fetch(
+      `https://api.binance.com/api/v3/depth?symbol=${pair}&limit=100`,
+      { next: { revalidate: 10 } }
+    );
+
+    if (res.status === 400) return `❌ Pair ${pair} tidak ditemukan di Binance`;
+    if (!res.ok) return `❌ Binance API error: ${res.status}`;
+
+    const data = await res.json();
+    if (!data.bids || !data.asks) return "❌ Data order book tidak valid";
+
+    const bidLevels = parseLevels(data.bids);
+    const askLevels = parseLevels(data.asks);
+
+    if (bidLevels.length === 0 || askLevels.length === 0) {
+      return "❌ Order book kosong";
+    }
+
+    const bidWalls = findWalls(bidLevels);
+    const askWalls = findWalls(askLevels);
+
+    const bestBid = bidLevels[0].price;
+    const bestAsk = askLevels[0].price;
+    const spread = ((bestAsk - bestBid) / bestBid * 100).toFixed(4);
+
+    const totalBid = bidLevels.reduce((s, l) => s + l.usdValue, 0);
+    const totalAsk = askLevels.reduce((s, l) => s + l.usdValue, 0);
+    const buyRatio = ((totalBid / (totalBid + totalAsk)) * 100).toFixed(1);
+
+    const sentiment = parseFloat(buyRatio) > 55 ? "🟢 Bullish"
+      : parseFloat(buyRatio) < 45 ? "🔴 Bearish" : "🟡 Netral";
+
+    let result = `💧 ORDER BOOK: ${pair}
+Mid: $${((bestBid + bestAsk) / 2).toFixed(4)} | Spread: ${spread}%
+Sentiment: ${sentiment} (Buy ${buyRatio}%)
+
+🟢 BID WALLS (Support):`;
+
+    if (bidWalls.length > 0) {
+      bidWalls.forEach((w, i) => {
+        result += `\n  ${i + 1}. $${w.price.toFixed(4)} — $${(w.usdValue / 1000).toFixed(1)}K`;
+      });
+    } else {
+      result += "\n  Tidak ada bid wall signifikan";
+    }
+
+    result += `\n🔴 ASK WALLS (Resistance):`;
+    if (askWalls.length > 0) {
+      askWalls.forEach((w, i) => {
+        result += `\n  ${i + 1}. $${w.price.toFixed(4)} — $${(w.usdValue / 1000).toFixed(1)}K`;
+      });
+    } else {
+      result += "\n  Tidak ada ask wall signifikan";
+    }
+
+    result += `\nNearest Support: $${bestBid.toFixed(4)}`;
+    result += `\nNearest Resistance: $${bestAsk.toFixed(4)}`;
+
+    return result;
+  } catch (err: any) {
+    return `❌ Order book error: ${err.message}`;
+  }
+}
+
 export async function getLiquidationLevels(symbol: string): Promise<string> {
   const apiKey = process.env.COINGLASS_API_KEY;
-
   if (!apiKey) {
-    return `⚠️ Coinglass API key belum diset. Tambahkan COINGLASS_API_KEY di .env.local\nDaftar gratis di: https://coinglass.com/pricing`;
+    return "⚠️ Coinglass API key belum diset di .env.local\nTambahkan: COINGLASS_API_KEY=your_key\nDaftar: https://coinglass.com/pricing";
   }
 
   try {
-    const coin = symbol.toUpperCase().replace("USDT", "");
-
+    const coin = symbol.toUpperCase().replace("USDT", "").replace(/[-_/].*$/, "");
     const res = await fetch(
       `https://open-api.coinglass.com/public/v2/liquidation_map?symbol=${coin}&range=12`,
-      {
-        headers: {
-          "coinglassSecret": apiKey,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { "coinglassSecret": apiKey } }
     );
 
-    if (!res.ok) {
-      return `❌ Coinglass API error: ${res.status}. Cek API key kamu.`;
-    }
+    if (!res.ok) return `❌ Coinglass error: ${res.status}`;
 
     const data = await res.json();
+    if (!data.data?.length) return `⚠️ Tidak ada liquidation data untuk ${coin}`;
 
-    if (!data.data || data.data.length === 0) {
-      return `❌ Tidak ada liquidation data untuk ${coin}`;
-    }
+    const sorted = data.data
+      .sort((a: any, b: any) =>
+        (b.longLiquidationUsd + b.shortLiquidationUsd) - (a.longLiquidationUsd + a.shortLiquidationUsd)
+      )
+      .slice(0, 6);
 
-    // Ambil liquidation clusters terbesar
-    const liqData = data.data
-      .sort((a: any, b: any) => (b.longLiquidationUsd + b.shortLiquidationUsd) - (a.longLiquidationUsd + a.shortLiquidationUsd))
-      .slice(0, 8);
-
-    let result = `💥 LIQUIDATION HEATMAP: ${coin}USDT\n(Data 12 jam terakhir)\n\n`;
-    result += `━━━━━━━━━━━━━━━━━━━━\n`;
-    result += `🎯 TOP LIQUIDATION CLUSTERS\n`;
-    result += `━━━━━━━━━━━━━━━━━━━━\n`;
-
-    liqData.forEach((item: any, i: number) => {
-      const totalLiq = (item.longLiquidationUsd + item.shortLiquidationUsd) / 1e6;
-      const longLiq = (item.longLiquidationUsd / 1e6).toFixed(2);
-      const shortLiq = (item.shortLiquidationUsd / 1e6).toFixed(2);
-      const dominant = item.longLiquidationUsd > item.shortLiquidationUsd ? "🔴 LONG" : "🟢 SHORT";
-
-      result += `${i + 1}. $${parseFloat(item.price).toFixed(4)}
-   💥 Total: $${totalLiq.toFixed(2)}M | ${dominant} dominant
-   🔴 Longs: $${longLiq}M | 🟢 Shorts: $${shortLiq}M\n\n`;
+    let result = `💥 LIQUIDATION MAP: ${coin}USDT\n`;
+    sorted.forEach((item: any, i: number) => {
+      const total = ((item.longLiquidationUsd + item.shortLiquidationUsd) / 1e6).toFixed(2);
+      const longs = (item.longLiquidationUsd / 1e6).toFixed(2);
+      const shorts = (item.shortLiquidationUsd / 1e6).toFixed(2);
+      const dominant = item.longLiquidationUsd > item.shortLiquidationUsd ? "🔴 LONGS" : "🟢 SHORTS";
+      result += `${i + 1}. $${parseFloat(item.price).toFixed(4)} — $${total}M (${dominant})\n   L:$${longs}M S:$${shorts}M\n`;
     });
-
-    result += `━━━━━━━━━━━━━━━━━━━━\n`;
-    result += `💡 Area liquidation besar = target price magnet\n`;
-    result += `🎯 Harga cenderung sweep ke cluster terbesar`;
+    result += `💡 Cluster besar = magnet zone harga`;
 
     return result;
-  } catch (error) {
-    return `❌ Gagal mengambil liquidation data: ${error}`;
+  } catch (err: any) {
+    return `❌ Liquidation error: ${err.message}`;
   }
 }
 
-// ==================== COMBINED LIQUIDITY REPORT ====================
 export async function getFullLiquidityReport(symbol: string): Promise<string> {
-  const [orderBook, liquidation] = await Promise.all([
+  const [ob, liq] = await Promise.all([
     getOrderBookLiquidity(symbol),
     getLiquidationLevels(symbol),
   ]);
-
-  return `${orderBook}\n\n${liquidation}`;
+  return `${ob}\n\n${liq}`;
 }

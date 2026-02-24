@@ -1,5 +1,3 @@
-// Paper Trading Engine — simpan state di memory (upgrade ke DB untuk production)
-
 export interface Position {
   id: string;
   coin: string;
@@ -7,8 +5,8 @@ export interface Position {
   type: "LONG" | "SHORT";
   entryPrice: number;
   currentPrice: number;
-  size: number;        // USD amount
-  quantity: number;    // coin amount
+  size: number;
+  quantity: number;
   tp1: number;
   tp2: number;
   tp3: number;
@@ -23,7 +21,7 @@ export interface Position {
 
 export interface Portfolio {
   userId: string;
-  balance: number;       // available cash
+  balance: number;
   initialBalance: number;
   totalPnl: number;
   totalPnlPercent: number;
@@ -36,7 +34,6 @@ export interface Portfolio {
   pnlHistory: { time: Date; value: number }[];
 }
 
-// In-memory store
 const portfolios = new Map<string, Portfolio>();
 
 export function getPortfolio(userId: string): Portfolio {
@@ -74,25 +71,31 @@ export function openPosition(
   tp2: number,
   tp3: number,
   sl: number,
-  riskPercent: number = 10 // pakai 10% dari balance per trade
+  riskPercent: number = 10
 ): { success: boolean; message: string; position?: Position } {
   const portfolio = getPortfolio(userId);
 
-  // Max 3 posisi open sekaligus
   if (portfolio.positions.length >= 3) {
-    return { success: false, message: "Max 3 posisi open. Tunggu posisi sebelumnya close." };
+    return { success: false, message: "Max 3 posisi open sekaligus" };
   }
 
-  const size = portfolio.balance * (riskPercent / 100);
-  if (size < 10) {
-    return { success: false, message: "Balance tidak cukup untuk open posisi." };
+  // Validasi harga TP/SL
+  if (type === "LONG") {
+    if (sl >= entryPrice) return { success: false, message: "SL harus di bawah entry untuk LONG" };
+    if (tp1 <= entryPrice) return { success: false, message: "TP harus di atas entry untuk LONG" };
+  } else {
+    if (sl <= entryPrice) return { success: false, message: "SL harus di atas entry untuk SHORT" };
+    if (tp1 >= entryPrice) return { success: false, message: "TP harus di bawah entry untuk SHORT" };
   }
+
+  const size = parseFloat((portfolio.balance * (riskPercent / 100)).toFixed(2));
+  if (size < 5) return { success: false, message: "Balance tidak cukup" };
 
   const quantity = size / entryPrice;
 
   const position: Position = {
-    id: Date.now().toString(),
-    coin: coin.toUpperCase(),
+    id: `${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+    coin: coin.toUpperCase().replace("USDT", ""),
     coinId,
     type,
     entryPrice,
@@ -106,10 +109,10 @@ export function openPosition(
     openTime: new Date(),
   };
 
-  portfolio.balance -= size;
+  portfolio.balance = parseFloat((portfolio.balance - size).toFixed(2));
   portfolio.positions.push(position);
 
-  return { success: true, message: `Posisi ${type} ${coin} dibuka di $${entryPrice}`, position };
+  return { success: true, message: `${type} ${coin} @ $${entryPrice}`, position };
 }
 
 export function updatePositions(
@@ -120,19 +123,21 @@ export function updatePositions(
   const closed: Position[] = [];
   const updated: Position[] = [];
 
-  portfolio.positions = portfolio.positions.filter((pos) => {
-    const currentPrice = priceMap[pos.coinId] || pos.currentPrice;
+  const remaining: Position[] = [];
+
+  for (const pos of portfolio.positions) {
+    const currentPrice = priceMap[pos.coinId] ?? pos.currentPrice;
     pos.currentPrice = currentPrice;
 
     // Hitung PnL
     if (pos.type === "LONG") {
-      pos.pnl = (currentPrice - pos.entryPrice) * pos.quantity;
+      pos.pnl = parseFloat(((currentPrice - pos.entryPrice) * pos.quantity).toFixed(2));
     } else {
-      pos.pnl = (pos.entryPrice - currentPrice) * pos.quantity;
+      pos.pnl = parseFloat(((pos.entryPrice - currentPrice) * pos.quantity).toFixed(2));
     }
-    pos.pnlPercent = (pos.pnl / pos.size) * 100;
+    pos.pnlPercent = parseFloat(((pos.pnl / pos.size) * 100).toFixed(2));
 
-    // Cek TP/SL
+    // Cek TP/SL hit
     let closeReason: Position["closeReason"] | null = null;
 
     if (pos.type === "LONG") {
@@ -152,61 +157,55 @@ export function updatePositions(
       pos.closeReason = closeReason;
       pos.closeTime = new Date();
 
-      // Return size + pnl ke balance
-      portfolio.balance += pos.size + pos.pnl;
-      portfolio.totalPnl += pos.pnl;
+      // Return modal + PnL ke balance
+      portfolio.balance = parseFloat((portfolio.balance + pos.size + pos.pnl).toFixed(2));
 
       // Update stats
       portfolio.totalTrades++;
       if (pos.pnl > 0) portfolio.wins++;
       else portfolio.losses++;
-      portfolio.winRate = (portfolio.wins / portfolio.totalTrades) * 100;
+      portfolio.winRate = parseFloat(((portfolio.wins / portfolio.totalTrades) * 100).toFixed(1));
+      portfolio.totalPnl = parseFloat((portfolio.totalPnl + pos.pnl).toFixed(2));
 
-      portfolio.closedTrades.unshift(pos);
-      if (portfolio.closedTrades.length > 50) portfolio.closedTrades.pop();
-
-      // Update PnL history
-      const totalValue = portfolio.balance + portfolio.positions.reduce((s, p) => s + p.size, 0);
-      portfolio.totalPnlPercent = ((totalValue - portfolio.initialBalance) / portfolio.initialBalance) * 100;
-      portfolio.pnlHistory.push({ time: new Date(), value: totalValue });
+      portfolio.closedTrades.unshift({ ...pos });
+      if (portfolio.closedTrades.length > 100) portfolio.closedTrades.pop();
 
       closed.push(pos);
-      return false; // remove dari positions
+    } else {
+      remaining.push(pos);
+      updated.push(pos);
     }
+  }
 
-    updated.push(pos);
-    return true;
-  });
+  portfolio.positions = remaining;
+
+  // Update PnL history — hitung total value setelah posisi closed
+  const openValue = remaining.reduce((s, p) => s + p.size + p.pnl, 0);
+  const totalValue = parseFloat((portfolio.balance + openValue).toFixed(2));
+  portfolio.totalPnlPercent = parseFloat(
+    (((totalValue - portfolio.initialBalance) / portfolio.initialBalance) * 100).toFixed(2)
+  );
+  portfolio.pnlHistory.push({ time: new Date(), value: totalValue });
+
+  // Keep max 500 history points
+  if (portfolio.pnlHistory.length > 500) {
+    portfolio.pnlHistory = portfolio.pnlHistory.slice(-500);
+  }
 
   return { closed, updated };
 }
 
 export function getPortfolioSummary(userId: string): string {
   const p = getPortfolio(userId);
-  const totalValue = p.balance + p.positions.reduce((s, pos) => s + pos.size + pos.pnl, 0);
-  const totalPnl = totalValue - p.initialBalance;
+  const openValue = p.positions.reduce((s, pos) => s + pos.size + pos.pnl, 0);
+  const totalValue = parseFloat((p.balance + openValue).toFixed(2));
+  const totalPnl = parseFloat((totalValue - p.initialBalance).toFixed(2));
   const totalPnlPct = ((totalPnl / p.initialBalance) * 100).toFixed(2);
 
-  let summary = `💼 PORTFOLIO SUMMARY
-💵 Balance: $${p.balance.toFixed(2)}
-📊 Total Value: $${totalValue.toFixed(2)}
-${totalPnl >= 0 ? "🟢" : "🔴"} Total PnL: $${totalPnl.toFixed(2)} (${totalPnlPct}%)
-🎯 Win Rate: ${p.winRate.toFixed(0)}% (${p.wins}W/${p.losses}L)
-📈 Total Trades: ${p.totalTrades}
-
-`;
-
-  if (p.positions.length > 0) {
-    summary += `⚡ OPEN POSITIONS (${p.positions.length})\n`;
-    p.positions.forEach((pos) => {
-      const pnlEmoji = pos.pnl >= 0 ? "🟢" : "🔴";
-      summary += `• ${pos.type} ${pos.coin} @ $${pos.entryPrice.toFixed(4)}
-  Current: $${pos.currentPrice.toFixed(4)} ${pnlEmoji} $${pos.pnl.toFixed(2)} (${pos.pnlPercent.toFixed(2)}%)
-  SL: $${pos.sl} | TP1: $${pos.tp1} | TP2: $${pos.tp2} | TP3: $${pos.tp3}\n\n`;
-    });
-  } else {
-    summary += "⚡ No open positions\n";
-  }
-
-  return summary;
+  return `💼 PORTFOLIO
+💵 Cash: $${p.balance.toFixed(2)}
+📊 Total: $${totalValue.toFixed(2)}
+${totalPnl >= 0 ? "🟢" : "🔴"} PnL: $${totalPnl} (${totalPnlPct}%)
+🎯 WR: ${p.winRate}% (${p.wins}W/${p.losses}L/${p.totalTrades} trades)
+⚡ Open: ${p.positions.length}/3`;
 }

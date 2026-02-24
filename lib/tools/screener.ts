@@ -1,3 +1,28 @@
+const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
+
+async function fetchWithRetry(url: string, retries = 3): Promise<any> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "Accept": "application/json" },
+        next: { revalidate: 30 },
+      });
+
+      if (res.status === 429) {
+        // Rate limited — tunggu 2 detik
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
 export interface TokenScreenerParams {
   minVolume?: number;
   minMarketCap?: number;
@@ -5,63 +30,53 @@ export interface TokenScreenerParams {
   minPriceChange?: number;
   maxPriceChange?: number;
   limit?: number;
-  page?: number;
 }
 
-// Ambil semua token dari CoinGecko (up to 250 token per request)
 export async function screenTokens(params: TokenScreenerParams): Promise<string> {
   try {
-    const page = params.page || 1;
-    const res = await fetch(
-      `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=250&page=${page}&sparkline=false&price_change_percentage=24h`
+    const data = await fetchWithRetry(
+      `${COINGECKO_BASE}/coins/markets?vs_currency=usd&order=volume_desc&per_page=250&page=1&sparkline=false&price_change_percentage=24h`
     );
-    const data = await res.json();
+
+    if (!Array.isArray(data)) return "❌ Screening gagal — data tidak valid";
 
     let filtered = data.filter((coin: any) => {
       const volume = coin.total_volume || 0;
       const marketCap = coin.market_cap || 0;
       const priceChange = coin.price_change_percentage_24h || 0;
-
       if (params.minVolume && volume < params.minVolume) return false;
       if (params.minMarketCap && marketCap < params.minMarketCap) return false;
       if (params.maxMarketCap && marketCap > params.maxMarketCap) return false;
       if (params.minPriceChange !== undefined && priceChange < params.minPriceChange) return false;
       if (params.maxPriceChange !== undefined && priceChange > params.maxPriceChange) return false;
       return true;
-    });
+    }).slice(0, params.limit || 7);
 
-    const limit = params.limit || 7;
-    filtered = filtered.slice(0, limit);
+    if (filtered.length === 0) return "❌ Tidak ada token yang memenuhi kriteria";
 
-    if (filtered.length === 0) {
-      return "❌ Tidak ada token yang memenuhi kriteria.";
-    }
-
-    const result = filtered.map((coin: any, i: number) => {
-      const change = coin.price_change_percentage_24h?.toFixed(2) || "N/A";
-      const vol = (coin.total_volume / 1e6).toFixed(1);
-      const mcap = (coin.market_cap / 1e6).toFixed(1);
+    const result = filtered.map((c: any, i: number) => {
+      const change = c.price_change_percentage_24h?.toFixed(2) || "N/A";
+      const vol = ((c.total_volume || 0) / 1e6).toFixed(1);
+      const mcap = ((c.market_cap || 0) / 1e6).toFixed(1);
       const emoji = parseFloat(change) > 0 ? "🟢" : "🔴";
-      return `${i + 1}. ${coin.name} (${coin.symbol.toUpperCase()})
-   💵 $${coin.current_price.toLocaleString()} ${emoji} ${change}%
-   💧 Vol: $${vol}M | MCap: $${mcap}M`;
-    }).join("\n\n");
+      return `${i + 1}. ${c.symbol.toUpperCase()} $${c.current_price?.toLocaleString() || 0} ${emoji}${change}% Vol:$${vol}M`;
+    }).join("\n");
 
-    return `🔍 Screening Results (${filtered.length} tokens):\n\n${result}`;
-  } catch {
-    return "Gagal melakukan screening.";
+    return `🔍 Screener:\n${result}`;
+  } catch (err: any) {
+    return `❌ Screener error: ${err.message}`;
   }
 }
 
-// Ambil OHLCV — coba CoinGecko dulu, fallback ke search
-export async function getTokenOHLCV(coinId: string): Promise<any> {
+export async function getTokenOHLCV(coinId: string): Promise<number[][] | null> {
   try {
-    const res = await fetch(
-      `https://api.coingecko.com/api/v3/coins/${coinId}/ohlc?vs_currency=usd&days=14`
+    const data = await fetchWithRetry(
+      `${COINGECKO_BASE}/coins/${coinId}/ohlc?vs_currency=usd&days=14`
     );
-    if (!res.ok) return null;
-    const data = await res.json();
-    return Array.isArray(data) && data.length > 0 ? data : null;
+    if (!Array.isArray(data) || data.length < 10) return null;
+    // Validasi format: [timestamp, open, high, low, close]
+    const valid = data.filter((c) => Array.isArray(c) && c.length === 5 && !c.some(isNaN));
+    return valid.length >= 10 ? valid : null;
   } catch {
     return null;
   }
@@ -69,11 +84,9 @@ export async function getTokenOHLCV(coinId: string): Promise<any> {
 
 export async function getTokenMarketData(coinId: string): Promise<any> {
   try {
-    const res = await fetch(
-      `https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`
+    return await fetchWithRetry(
+      `${COINGECKO_BASE}/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`
     );
-    if (!res.ok) return null;
-    return await res.json();
   } catch {
     return null;
   }
